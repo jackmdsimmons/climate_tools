@@ -1,0 +1,8 @@
+# Downloaded data
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
