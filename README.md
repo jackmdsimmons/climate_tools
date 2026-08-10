@@ -8,6 +8,16 @@ Scripts to source and analyze climate and biodiversity datasets.
 pip install -r requirements.txt
 ```
 
+## Analysis
+
+| Package | Description |
+|---|---|
+| [`climate_attribution/`](climate_attribution/README.md) | LMDI attribution of changes in portfolio climate KPIs — how much of a move in WACI came from reallocation vs. real decarbonisation |
+
+```
+pytest tests
+```
+
 ## Datasources
 
 | Source | Folder | Description |
