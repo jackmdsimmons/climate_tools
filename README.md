@@ -23,6 +23,7 @@ pytest tests
 | Source | Folder | Description |
 |---|---|---|
 | [SBTi](https://sciencebasedtargets.org/target-dashboard) | `sources/sbti/` | Science Based Targets initiative — corporate emissions targets |
+| [World Bank](https://datahelpdesk.worldbank.org/knowledgebase/articles/889392) | `sources/worldbank/` | Sovereign indicators — territorial emissions and GDP |
 | [Trase](https://trase.earth/open-data) | `sources/trase/` | Supply chain and deforestation data — 186 datasets across 10 countries and 10 commodities |
 
 ## Usage
@@ -34,6 +35,14 @@ Each script in `sources/` can be run independently. Downloaded data is saved to 
 python sources/sbti/fetch_sbti.py
 ```
 Downloads the latest company and target datasets as dated Excel files. Updated by SBTi every Thursday.
+
+**World Bank**
+```
+python sources/worldbank/fetch_worldbank.py --list
+python sources/worldbank/fetch_worldbank.py --indicator NY.GDP.MKTP.CD
+```
+Sovereign emissions and GDP series, feeding `climate_attribution`. Not yet run
+against the live API — see `climate_attribution/README.md`.
 
 **Trase**
 ```

@@ -3,9 +3,9 @@
 Constituent-level attribution of changes in portfolio climate KPIs, using an
 LMDI (logarithmic mean Divisia index) decomposition.
 
-**Status: phases 0-1 complete.** The metric-agnostic engine and the partitioning
-layer are built and validated against published results. No metric presets yet —
-see the roadmap below.
+**Status: phases 0-2 complete.** The metric-agnostic engine, the partitioning
+layer, and the data contract are built and validated against published results.
+No metric presets yet — see the roadmap below.
 
 ## The problem
 
@@ -108,6 +108,59 @@ for label, value in result.waterfall():
     print(f"{label:<50}{value:>10.2f}")
 ```
 
+## The data contract
+
+Sources are adapters onto a vendor-neutral core. Two flat record types:
+`Holding` (a portfolio fact, known exactly) and `Observation` (a fact about the
+world, measured by someone else and revised without warning).
+
+```python
+from climate_attribution.data import Holding, Observation, Panel, validate
+
+panel = Panel(holdings, observations)
+
+# Opt-in. Nothing here runs as a side effect of assembly or decomposition.
+for finding in validate(panel, ["t0", "t1"], measures=["scope1", "gdp"]):
+    print(finding)
+
+contributions = panel.contribution(["scope1"], "gdp", "t0", scale=1000.0)
+```
+
+Three `Observation` fields exist solely to stop silently wrong arithmetic:
+
+- **`unit`** — mixing tonnes with megatonnes gives a clean residual and a wrong
+  answer. Units are compared, never converted; `Panel.intensity` takes an
+  explicit `scale` rather than guessing.
+- **`basis`** — nominal vs PPP GDP, EVIC vs market cap. Two entities on different
+  bases are not comparable.
+- **`vintage`** — required, no default. It cannot be recovered later: you cannot
+  look at a GDP figure six months on and determine which release produced it. A
+  rebasing can move a country's measured GDP by 80% with no change in real
+  activity, which reads as a 45% fall in carbon intensity and lands squarely on
+  the intensity effect. `validate` reports vintage changes between periods; the
+  decomposition itself still reconciles perfectly, which is exactly the danger.
+
+Nothing in the contract is entity-specific. `test_end_to_end.py` pins the claim
+that a sovereign portfolio needs no sovereign-specific code — a GDP denominator
+and a region grouping, both passed in as ordinary data.
+
+### Diagnostics are opt-in
+
+`occupancy()` reports how much of a grouping can actually carry a selection
+effect. Selection is silent in a group of one: a lone member's share of its own
+cell is 100% in both periods, so its effect is zero by construction. As levels
+are added, cells multiply and occupancy collapses until the reported selection
+effect describes the taxonomy rather than the portfolio.
+
+```
+>>> occupancy(weights, region, sector, subsector).summary()
+'3 level(s), 6 cells, 6 holding a single member; 100.0% of weight sits where
+ selection is structurally zero'
+```
+
+It is never called automatically. One grouping level is defensible, two
+sometimes; deeper is a diagnostic, not a result.
+
 ## Nesting order is a modelling choice
 
 Levels nest to any depth — `region > sector > subsector` gives a driver per
@@ -172,6 +225,19 @@ paper's exhibit 5 gives GS-LI an instrument price inconsistent with its stated
 instrument type (the published weights resolve it), and the body text's 19,677
 tCO2e opening figure disagrees with exhibit 7's 19,667 (the exhibit is right).
 
+### What is not verified
+
+`sources/worldbank/fetch_worldbank.py` has **never been run against the live
+API** — every climate and economic data host was blocked by egress policy in the
+environment it was written in. The download is unverified boilerplate; run it
+once before trusting it.
+
+The mapping onto the contract *is* tested, against
+`tests/fixtures/worldbank_payload.py`, which records the response shape from the
+API's published documentation rather than from a captured call. If the live
+response differs, that fixture is the single place to correct — the adapter and
+its tests follow from it.
+
 ## Roadmap
 
 - [x] **Phase 0 — core engine.** Logarithmic mean, metric-agnostic LMDI over
@@ -181,7 +247,7 @@ tCO2e opening figure disagrees with exhibit 7's 19,667 (the exhibit is right).
       entrants and leavers; blocks with per-subset driver chains; survivor-subset
       weight renormalisation, with group membership required for both periods so
       that a reclassification is rejected rather than assumed away.
-- [ ] **Phase 2 — data contract and validation.** Entity-generic records
+- [x] **Phase 2 — data contract and validation.** Entity-generic records
       (`entity_id`, `entity_type`, `unit`, `basis`, `vintage`) so provenance is
       captured at ingest while it is still recoverable; checks for vintage
       consistency, weight coverage, and mixed denominator bases. A sovereign
@@ -191,6 +257,9 @@ tCO2e opening figure disagrees with exhibit 7's 19,667 (the exhibit is right).
       effect is structurally zero, since selection is silent in a group of one
       and deep nestings quietly become artifacts of the taxonomy. **All
       diagnostics are opt-in** — never run by default, never warn unbidden.
+      A World Bank adapter and `sources/worldbank/` fetcher show how a source
+      maps onto the contract; the adapter is tested against a recorded payload,
+      the download is not (see Validation).
 - [ ] **Phase 3 — denominator factoring.** Split the activity denominator into
       real growth, inflation, FX and data-revision drivers. This is where the
       GDP-rebasing and nominal-vs-PPP problems become their own waterfall bars
