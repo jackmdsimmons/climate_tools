@@ -187,6 +187,10 @@ tCO2e opening figure disagrees with exhibit 7's 19,667 (the exhibit is right).
       consistency, weight coverage, and mixed denominator bases. A sovereign
       worked example serves as the regression test — the engine needs no
       sovereign-specific code, which is the property that test pins down.
+      Includes a cell-occupancy diagnostic reporting how much of a selection
+      effect is structurally zero, since selection is silent in a group of one
+      and deep nestings quietly become artifacts of the taxonomy. **All
+      diagnostics are opt-in** — never run by default, never warn unbidden.
 - [ ] **Phase 3 — denominator factoring.** Split the activity denominator into
       real growth, inflation, FX and data-revision drivers. This is where the
       GDP-rebasing and nominal-vs-PPP problems become their own waterfall bars
