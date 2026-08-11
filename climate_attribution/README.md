@@ -80,12 +80,13 @@ partition = classify(contributions_t0, contributions_t1)
 kept = partition.survivors
 
 # Step 2 -- drivers per subset. Weights renormalised within the survivors.
-# Groups are generic: GICS sector for corporates, region or income band for
-# sovereigns. Both periods are required so a reclassification is caught, not
-# assumed away.
+# Levels are generic and can be nested to any depth: GICS sector for corporates,
+# region then income band for sovereigns. Each level carries membership for both
+# periods so a reclassification is caught rather than assumed away.
 weight_drivers = nested_weight_drivers(
-    weights_t0, weights_t1, groups_t0, groups_t1, labels=kept,
-    allocation_name="sector_allocation",   # defaults are entity-neutral
+    weights_t0, weights_t1,
+    [Level("sector_allocation", sectors_t0, sectors_t1)],
+    labels=kept,
     selection_name="stock_selection",
 )
 
@@ -107,7 +108,38 @@ for label, value in result.waterfall():
     print(f"{label:<50}{value:>10.2f}")
 ```
 
-Two properties are worth knowing when composing driver sets:
+## Nesting order is a modelling choice
+
+Levels nest to any depth — `region > sector > subsector` gives a driver per
+level, all reconciling exactly. But with two *crossed* dimensions there is no
+neutral decomposition. Nesting region inside sector and sector inside region both
+add up to the same total while attributing different amounts to each dimension:
+
+```
+NEST: region -> sector          NEST: sector -> region
+   region             -3.58        sector            -19.85
+   sector_in_region  -13.55        region_in_sector    2.73
+   within_finest      -1.48        within_finest      -1.48
+   intensity         -10.40        intensity         -10.40
+   sum               -29.00        sum               -29.00
+```
+
+The region effect flips sign. Whichever dimension is nested first absorbs the
+shared variation — the same phenomenon that gives Brinson attribution its
+interaction term.
+
+This is **not** covered by LMDI's order-invariance. LMDI is invariant to the
+order drivers are *listed* in; nesting order changes the driver values themselves,
+before any decomposition happens. `test_nesting_order_changes_the_attribution`
+pins this deliberately so it is not later "fixed" as a bug.
+
+Two consequences the API enforces: driver names encode the nesting
+(`sector_in_region`, never a bare `sector` that could be mistaken for a
+nested-first effect), and the ordering is explicit in the caller's `levels`
+argument. Where there is no primary dimension, prefer separate single-level
+decompositions as alternative lenses and do not add their effects together.
+
+## Two properties worth knowing when composing driver sets
 
 - Because effects are sums of logs, **splitting a driver into multiplicative
   factors splits its effect additively**, and merging two drivers merges their

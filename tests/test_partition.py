@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
-from climate_attribution import Block, classify, decompose_blocks
+from climate_attribution import (
+    Block,
+    Level,
+    classify,
+    decompose_blocks,
+    lmdi_decompose,
+)
 from climate_attribution.partition import (
     GroupReclassified,
     nested_weight_drivers,
@@ -83,36 +90,46 @@ def test_subset_factor_carries_the_subsets_share_of_the_portfolio():
 def test_nested_weight_drivers_are_positive_and_ready_for_lmdi():
     groups = ["brown", "green", "green"]
     drivers = nested_weight_drivers(
-        [0.3, 0.3, 0.3], [0.2, 0.5, 0.3], groups, groups
+        [0.3, 0.3, 0.3], [0.2, 0.5, 0.3], [Level("sector", groups, groups)]
     )
     for start, end in drivers.values():
         assert all(v > 0 for v in start)
         assert all(v > 0 for v in end)
 
 
-def test_default_driver_names_are_entity_neutral():
+def test_driver_names_come_from_the_level_names():
     """A sovereign waterfall must not come out labelled 'stock selection'."""
     groups = ["EMEA", "APAC"]
-    drivers = nested_weight_drivers([0.5, 0.5], [0.4, 0.6], groups, groups)
-    assert set(drivers) == {
-        "reallocation",
-        "group_allocation",
-        "within_group_selection",
-    }
+    drivers = nested_weight_drivers(
+        [0.5, 0.5], [0.4, 0.6], [Level("region", groups, groups)]
+    )
+    assert set(drivers) == {"reallocation", "region", "within_region"}
 
 
 def test_driver_names_can_be_set_to_match_the_context():
     groups = ["energy", "utilities"]
     drivers = nested_weight_drivers(
-        [0.5, 0.5], [0.4, 0.6], groups, groups,
-        allocation_name="sector_allocation",
+        [0.5, 0.5], [0.4, 0.6],
+        [Level("sector_allocation", groups, groups)],
         selection_name="stock_selection",
     )
-    assert set(drivers) == {
-        "reallocation",
-        "sector_allocation",
-        "stock_selection",
-    }
+    assert set(drivers) == {"reallocation", "sector_allocation", "stock_selection"}
+
+
+def test_no_levels_gives_reallocation_and_pure_selection():
+    drivers = nested_weight_drivers([0.4, 0.5], [0.3, 0.6])
+    assert set(drivers) == {"reallocation", "selection"}
+    assert drivers["reallocation"][0] == pytest.approx([0.9, 0.9])
+    assert drivers["selection"][0] == pytest.approx([4 / 9, 5 / 9])
+
+
+def test_duplicate_driver_names_are_rejected():
+    groups = ["a", "b"]
+    with pytest.raises(ValueError, match="unique"):
+        nested_weight_drivers(
+            [0.5, 0.5], [0.4, 0.6],
+            [Level("reallocation", groups, groups)],
+        )
 
 
 def test_empty_subset_is_rejected():
@@ -131,8 +148,112 @@ def test_group_label_count_must_match_weights():
 
 
 def test_mismatched_period_lengths_are_rejected():
+    groups = ["a", "b"]
     with pytest.raises(ValueError, match="same length"):
-        nested_weight_drivers([0.5, 0.5], [1.0], ["a", "b"], ["a", "b"])
+        nested_weight_drivers([0.5, 0.5], [1.0], [Level("g", groups, groups)])
+
+
+# ── Multi-level nesting ──────────────────────────────────────────────────────
+
+
+NESTED_BOOK = {
+    #          region  sector    w_t0  w_t1
+    "A": ("EU", "energy", 0.20, 0.24),
+    "E": ("EU", "energy", 0.10, 0.06),
+    "B": ("EU", "tech", 0.25, 0.20),
+    "C": ("US", "energy", 0.25, 0.20),
+    "D": ("US", "tech", 0.20, 0.30),
+}
+NESTED_INTENSITY_T0 = [500.0, 520.0, 50.0, 400.0, 60.0]
+NESTED_INTENSITY_T1 = [450.0, 500.0, 45.0, 420.0, 55.0]
+
+
+def nested_book():
+    labels = list(NESTED_BOOK)
+    regions = [NESTED_BOOK[k][0] for k in labels]
+    sectors = [NESTED_BOOK[k][1] for k in labels]
+    w0 = [NESTED_BOOK[k][2] for k in labels]
+    w1 = [NESTED_BOOK[k][3] for k in labels]
+    return labels, regions, sectors, w0, w1
+
+
+def test_any_depth_of_nesting_multiplies_back_to_the_weights():
+    _, regions, sectors, w0, _ = nested_book()
+    for levels in ((), (regions,), (regions, sectors), (sectors, regions)):
+        factors = nested_weights(w0, *levels)
+        assert len(factors) == len(levels) + 2
+        product = np.ones(len(w0))
+        for factor in factors:
+            product = product * factor
+        assert product == pytest.approx(w0)
+
+
+def test_deeper_levels_are_keyed_cumulatively():
+    """
+    Keying on the bare label would pool 'energy' across EU and US and break the
+    telescoping. The share must be within the parent group only.
+    """
+    _, regions, sectors, w0, _ = nested_book()
+    _, region_share, sector_in_region, within = nested_weights(w0, regions, sectors)
+
+    # EU energy is 0.30 of EU's 0.55, not of the 0.55 total energy weight.
+    assert sector_in_region[0] == pytest.approx(0.30 / 0.55)
+    # Within EU energy, A holds 0.20 of 0.30.
+    assert within[0] == pytest.approx(0.20 / 0.30)
+    assert region_share[0] == pytest.approx(0.55 / 1.0)
+
+
+def test_nesting_names_encode_the_hierarchy():
+    _, regions, sectors, w0, w1 = nested_book()
+    drivers = nested_weight_drivers(
+        w0, w1,
+        [Level("region", regions, regions), Level("sector", sectors, sectors)],
+    )
+    assert list(drivers) == [
+        "reallocation", "region", "sector_in_region", "within_sector"
+    ]
+
+
+def test_nesting_order_changes_the_attribution():
+    """
+    Pinned deliberately: this is a property of crossed dimensions, not a bug.
+    Whichever dimension is nested first absorbs the shared variation, so the
+    region effect here flips sign depending on the order. LMDI's invariance to
+    driver *listing* order does not extend to *nesting* order, because nesting
+    changes the driver values before any decomposition happens.
+    """
+    labels, regions, sectors, w0, w1 = nested_book()
+
+    def run(levels):
+        drivers = nested_weight_drivers(w0, w1, levels, labels=labels)
+        drivers["intensity"] = (NESTED_INTENSITY_T0, NESTED_INTENSITY_T1)
+        result = lmdi_decompose(drivers, labels=labels)
+        result.check_additivity()
+        return result
+
+    region_first = run(
+        [Level("region", regions, regions), Level("sector", sectors, sectors)]
+    )
+    sector_first = run(
+        [Level("sector", sectors, sectors), Level("region", regions, regions)]
+    )
+
+    # Both reconcile to the same total.
+    assert region_first.delta == pytest.approx(sector_first.delta)
+    assert region_first.explained == pytest.approx(sector_first.explained)
+
+    # The region effect flips sign with the nesting order.
+    assert region_first.effects["region"] == pytest.approx(-3.58, abs=0.05)
+    assert sector_first.effects["region_in_sector"] == pytest.approx(2.73, abs=0.05)
+
+    # What the two orderings agree on: the finest cell is region x sector either
+    # way, so anything below it is untouched.
+    assert region_first.effects["within_sector"] == pytest.approx(
+        sector_first.effects["within_region"]
+    )
+    assert region_first.effects["intensity"] == pytest.approx(
+        sector_first.effects["intensity"]
+    )
 
 
 # ── Reclassification ─────────────────────────────────────────────────────────
@@ -148,36 +269,57 @@ def test_reclassified_instrument_is_rejected_not_assumed_away():
         nested_weight_drivers(
             [0.5, 0.5],
             [0.4, 0.6],
-            ["lower-middle", "high"],
-            ["upper-middle", "high"],
+            [Level("income_band", ["lower-middle", "high"], ["upper-middle", "high"])],
             labels=["IDN", "DEU"],
         )
     message = str(excinfo.value)
     assert "IDN" in message
+    assert "income_band" in message
     assert "lower-middle" in message and "upper-middle" in message
     assert "DEU" not in message
 
 
+def test_reclassification_is_caught_at_any_level():
+    groups = ["EMEA", "EMEA"]
+    with pytest.raises(GroupReclassified, match="sector"):
+        nested_weight_drivers(
+            [0.5, 0.5], [0.4, 0.6],
+            [
+                Level("region", groups, groups),
+                Level("sector", ["energy", "tech"], ["utilities", "tech"]),
+            ],
+        )
+
+
 def test_passing_the_same_groups_twice_asserts_fixed_membership():
     groups = ["a", "b"]
-    drivers = nested_weight_drivers([0.5, 0.5], [0.4, 0.6], groups, groups)
-    assert drivers["group_allocation"][0] == pytest.approx([0.5, 0.5])
+    drivers = nested_weight_drivers(
+        [0.5, 0.5], [0.4, 0.6], [Level("group", groups, groups)]
+    )
+    assert drivers["group"][0] == pytest.approx([0.5, 0.5])
 
 
 def test_reclassification_error_survives_without_labels():
     with pytest.raises(GroupReclassified, match="#0"):
-        nested_weight_drivers([0.5, 0.5], [0.4, 0.6], ["a", "b"], ["c", "b"])
+        nested_weight_drivers(
+            [0.5, 0.5], [0.4, 0.6], [Level("g", ["a", "b"], ["c", "b"])]
+        )
 
 
 def test_group_label_lengths_must_match_each_other():
     with pytest.raises(ValueError, match="same length"):
-        nested_weight_drivers([0.5, 0.5], [0.4, 0.6], ["a", "b"], ["a"])
+        nested_weight_drivers(
+            [0.5, 0.5], [0.4, 0.6], [Level("g", ["a", "b"], ["a"])]
+        )
 
 
 def test_label_count_must_match_instruments():
+    groups = ["a", "b"]
     with pytest.raises(ValueError, match="labels"):
         nested_weight_drivers(
-            [0.5, 0.5], [0.4, 0.6], ["a", "b"], ["a", "b"], labels=["only-one"]
+            [0.5, 0.5], [0.4, 0.6],
+            [Level("g", groups, groups)],
+            labels=["only-one"],
         )
 
 

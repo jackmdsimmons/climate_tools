@@ -12,7 +12,13 @@ from __future__ import annotations
 
 import pytest
 
-from climate_attribution import Block, classify, decompose_blocks, lmdi_decompose
+from climate_attribution import (
+    Block,
+    Level,
+    classify,
+    decompose_blocks,
+    lmdi_decompose,
+)
 from climate_attribution.partition import nested_weight_drivers
 
 from .fixtures import edhec_portfolio as fx
@@ -221,10 +227,8 @@ def test_exhibit_10a_sector_allocation_and_stock_selection():
     weight_drivers = nested_weight_drivers(
         fx.subset(fx.weights("t0"), kept),
         fx.subset(fx.weights("t1"), kept),
-        sectors,
-        sectors,
+        [Level("sector_allocation", sectors, sectors)],
         labels=kept,
-        allocation_name="sector_allocation",
         selection_name="stock_selection",
     )
 

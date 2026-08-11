@@ -1,9 +1,13 @@
 """
 Weight renormalisation within a subset of the portfolio.
 
-When survivors are analysed separately from divested holdings, their allocation
-and selection effects must be measured against weights that have been
-renormalised *within the survivor subset*:
+A portfolio weight is factored into a chain of nested shares, each one "this
+thing's share of the level above it":
+
+    w_j = W_subset * (W_L1 / W_subset) * (W_L1L2 / W_L1) * ... * (w_j / W_L1..Lk)
+
+Every denominator cancels against the next numerator, so the chain collapses back
+to w_j. With one grouping level that is the familiar three-factor split:
 
     w_j = w_RI * wg_g(j) * wig_j
 
@@ -11,8 +15,9 @@ renormalised *within the survivor subset*:
     wg_g(j)    weight of group g within that subset
     wig_j      weight of instrument j within its group, within that subset
 
-Without this, a divested holding distorts the allocation effect of the names
-that stayed. From Bouchet (2025), footnote 9:
+Renormalising *within the subset* is what stops a divested holding from
+distorting the allocation effect of the names that stayed. From Bouchet (2025),
+footnote 9:
 
     "A driver capturing the weight change of remaining instruments relative to
     divested ones is introduced, isolating sector allocation and stock selection
@@ -23,17 +28,58 @@ The `w_RI` factor is not bookkeeping -- it is a reported effect in its own right
 (the "reallocation effect"), capturing the subset growing from 90% to 100% of the
 portfolio as the divested holding is sold.
 
-"Group" is deliberately generic: GICS sector for a corporate book, region or
-income band for a sovereign one, asset class for a blended one. Pass the driver
-names that match your context -- the defaults are neutral so that a sovereign
-waterfall does not come out labelled "stock selection".
+Levels are deliberately generic: GICS sector for a corporate book, region or
+income band for a sovereign one, asset class for a blended one. Level names are
+required rather than defaulted, because they end up as driver names in the
+report and the nesting they describe is a modelling choice -- see below.
+
+
+NESTING ORDER IS A MODELLING CHOICE
+-----------------------------------
+With two crossed dimensions there is no neutral decomposition. Nesting region
+inside sector and nesting sector inside region both reconcile exactly to the same
+total, but they attribute different amounts -- sometimes different signs -- to
+each dimension. Whichever dimension is nested first absorbs the shared variation.
+
+This is *not* something LMDI's order-invariance protects against. LMDI is
+invariant to the order drivers are listed in, because the effects are computed
+from the driver values. Nesting order changes the driver values themselves,
+before any decomposition happens. It is the same phenomenon that gives Brinson
+attribution its interaction term.
+
+Two consequences the API enforces:
+
+  * Driver names encode the nesting ("sector_in_region", not bare "sector"), so a
+    nested-second effect cannot be mistaken for a nested-first one in a report.
+  * The ordering is explicit in the caller's `levels` argument rather than
+    inferred, and should be documented alongside the results.
+
+Where there is genuinely no primary dimension, prefer running separate
+single-level decompositions as alternative lenses, and do not add their effects
+together.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Sequence
 
 import numpy as np
+
+
+@dataclass(frozen=True)
+class Level:
+    """
+    One grouping level, with its membership labels in each period.
+
+    Membership is required for both periods so that a reclassification is
+    detected rather than assumed away. Passing the same sequence twice is the
+    correct way to assert that membership is fixed.
+    """
+
+    name: str
+    t0: Sequence[str]
+    t1: Sequence[str]
 
 
 class GroupReclassified(ValueError):
@@ -48,25 +94,33 @@ class GroupReclassified(ValueError):
 
 def nested_weights(
     weights: Sequence[float],
-    groups: Sequence[str],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    *levels: Sequence[str],
+) -> list[np.ndarray]:
     """
-    Factor subset weights into (subset, group-within-subset, member-within-group).
+    Factor subset weights into a chain of nested shares.
 
     Args:
         weights: portfolio weight of each instrument in the subset. These are
             weights in the *whole* portfolio, not pre-normalised ones -- the
-            subset factor is what carries the subset's share.
-        groups: group label per instrument, same length as `weights`.
+            first factor is what carries the subset's share, and normalising it
+            away is what makes a divestment leak into the allocation effect.
+        *levels: one label sequence per grouping level, coarsest first. Each must
+            be the same length as `weights`. Pass none for no grouping at all.
 
     Returns:
-        Three arrays whose elementwise product equals `weights`.
+        `len(levels) + 2` arrays whose elementwise product equals `weights`:
+        the subset total, one share per level, then each member's share of its
+        finest group.
     """
     w = np.asarray(weights, dtype=float)
     if w.ndim != 1:
         raise ValueError("weights must be 1-D")
-    if len(groups) != w.size:
-        raise ValueError(f"got {len(groups)} group labels for {w.size} instruments")
+    for depth, labels in enumerate(levels):
+        if len(labels) != w.size:
+            raise ValueError(
+                f"level {depth} has {len(labels)} group labels "
+                f"for {w.size} instruments"
+            )
 
     subset_total = float(w.sum())
     if subset_total <= 0.0:
@@ -74,100 +128,130 @@ def nested_weights(
             "subset has zero total weight; it cannot carry a weight decomposition"
         )
 
-    group_totals = np.zeros(w.size, dtype=float)
-    for label in set(groups):
-        mask = np.array([g == label for g in groups])
-        total = float(w[mask].sum())
-        if total <= 0.0:
-            raise ValueError(
-                f"group {label!r} has zero total weight within the subset; "
-                "drop the group or move its instruments to their own block"
-            )
-        group_totals[mask] = total
+    factors: list[np.ndarray] = [np.full(w.size, subset_total)]
+    parent_totals = np.full(w.size, subset_total)
 
-    subset = np.full(w.size, subset_total)
-    group_share = group_totals / subset_total
-    within_group = w / group_totals
-    return subset, group_share, within_group
+    for depth in range(len(levels)):
+        # The key is cumulative: keying on the bare label would pool, say,
+        # "energy" across every region and break the telescoping.
+        keys = list(zip(*levels[: depth + 1]))
+        totals = np.zeros(w.size, dtype=float)
+        for key in set(keys):
+            mask = np.array([k == key for k in keys])
+            total = float(w[mask].sum())
+            if total <= 0.0:
+                shown = " > ".join(str(part) for part in key)
+                raise ValueError(
+                    f"group {shown!r} has zero total weight within the subset; "
+                    "drop the group or move its instruments to their own block"
+                )
+            totals[mask] = total
+        factors.append(totals / parent_totals)
+        parent_totals = totals
+
+    factors.append(w / parent_totals)
+    return factors
 
 
 def nested_weight_drivers(
     weights_t0: Sequence[float],
     weights_t1: Sequence[float],
-    groups_t0: Sequence[str],
-    groups_t1: Sequence[str],
+    levels: Sequence[Level] = (),
     *,
     labels: Sequence[str] | None = None,
     subset_name: str = "reallocation",
-    allocation_name: str = "group_allocation",
-    selection_name: str = "within_group_selection",
+    selection_name: str | None = None,
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """
-    Build the three weight drivers for a subset, ready to pass to `lmdi_decompose`.
-
-    Group membership is required for *both* periods so that a reclassification is
-    detected rather than assumed away. Passing the same sequence twice is the
-    correct way to assert that membership is fixed.
+    Build the weight drivers for a subset, ready to pass to `lmdi_decompose`.
 
     Args:
         weights_t0, weights_t1: portfolio weights of the subset's members.
-        groups_t0, groups_t1: group label per member in each period.
+        levels: grouping levels, coarsest first. The order is a modelling choice
+            that changes the attribution -- see the module docstring.
         labels: optional instrument identifiers, used in error messages.
         subset_name: driver name for the subset's share of the portfolio.
-        allocation_name: driver name for group weight within the subset.
-            Corporate books usually want "sector_allocation"; sovereign books
-            "region_allocation" or similar.
-        selection_name: driver name for member weight within its group.
-            Corporate books usually want "stock_selection".
+        selection_name: driver name for member weight within its finest group.
+            Defaults to "within_<finest level>". Corporate books analysing a
+            single sector level usually want "stock_selection".
+
+    Returns:
+        One driver per factor, named so the nesting is legible: the first level
+        keeps its own name, deeper levels are named "<level>_in_<parent>".
 
     Raises:
         GroupReclassified: if any instrument changes group between periods.
     """
-    if len(weights_t0) != len(weights_t1):
+    levels = tuple(levels)
+    n = len(weights_t0)
+    if n != len(weights_t1):
         raise ValueError("weights_t0 and weights_t1 must be the same length")
-    if len(groups_t0) != len(groups_t1):
-        raise ValueError("groups_t0 and groups_t1 must be the same length")
+    for level in levels:
+        if len(level.t0) != len(level.t1):
+            raise ValueError(
+                f"level {level.name!r}: t0 and t1 group labels "
+                "must be the same length"
+            )
 
-    _reject_reclassified(groups_t0, groups_t1, labels)
+    _reject_reclassified(levels, labels, n)
 
-    subset_0, group_0, within_0 = nested_weights(weights_t0, groups_t0)
-    subset_1, group_1, within_1 = nested_weights(weights_t1, groups_t1)
+    factors_t0 = nested_weights(weights_t0, *(level.t0 for level in levels))
+    factors_t1 = nested_weights(weights_t1, *(level.t1 for level in levels))
+
+    names = [subset_name, *_level_driver_names(levels)]
+    if selection_name is not None:
+        names.append(selection_name)
+    elif levels:
+        names.append(f"within_{levels[-1].name}")
+    else:
+        names.append("selection")
+
+    if len(set(names)) != len(names):
+        raise ValueError(f"driver names must be unique, got {names}")
 
     return {
-        subset_name: (subset_0, subset_1),
-        allocation_name: (group_0, group_1),
-        selection_name: (within_0, within_1),
+        name: (start, end)
+        for name, start, end in zip(names, factors_t0, factors_t1)
     }
 
 
 # ── Internals ────────────────────────────────────────────────────────────────
 
 
+def _level_driver_names(levels: tuple[Level, ...]) -> list[str]:
+    """Name each level so its position in the nesting is visible."""
+    return [
+        level.name if depth == 0 else f"{level.name}_in_{levels[depth - 1].name}"
+        for depth, level in enumerate(levels)
+    ]
+
+
 def _reject_reclassified(
-    groups_t0: Sequence[str],
-    groups_t1: Sequence[str],
+    levels: tuple[Level, ...],
     labels: Sequence[str] | None,
+    n: int,
 ) -> None:
     """Fail on membership changes the decomposition cannot represent."""
-    if labels is not None and len(labels) != len(groups_t0):
-        raise ValueError(
-            f"got {len(labels)} labels for {len(groups_t0)} instruments"
-        )
+    if labels is not None and len(labels) != n:
+        raise ValueError(f"got {len(labels)} labels for {n} instruments")
 
     moved = [
         (
+            level.name,
             str(labels[i]) if labels is not None else f"#{i}",
-            groups_t0[i],
-            groups_t1[i],
+            level.t0[i],
+            level.t1[i],
         )
-        for i in range(len(groups_t0))
-        if groups_t0[i] != groups_t1[i]
+        for level in levels
+        for i in range(n)
+        if level.t0[i] != level.t1[i]
     ]
     if not moved:
         return
 
     shown = "\n".join(
-        f"  {name}: {before!r} -> {after!r}" for name, before, after in moved[:5]
+        f"  {level}: {name} moved {before!r} -> {after!r}"
+        for level, name, before, after in moved[:5]
     )
     if len(moved) > 5:
         shown += f"\n  ... ({len(moved)} total)"
@@ -180,5 +264,5 @@ def _reject_reclassified(
         "This is routine for sovereign books grouped by income band, which are "
         "revised annually. Either move the reclassified instruments to their own "
         "block, or pick one scheme for both periods and document the choice -- "
-        "then pass it as both `groups_t0` and `groups_t1`."
+        "then pass it as both `t0` and `t1` on the Level."
     )
