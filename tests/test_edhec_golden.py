@@ -215,10 +215,17 @@ def test_exhibit_10a_sector_allocation_and_stock_selection():
     partition = classify(contributions_t0, contributions_t1)
     kept = partition.survivors
 
+    # The paper's equity vocabulary is passed explicitly rather than relying on
+    # the library's neutral defaults, which are shared with sovereign books.
+    sectors = [fx.SECTORS[i] for i in kept]
     weight_drivers = nested_weight_drivers(
         fx.subset(fx.weights("t0"), kept),
         fx.subset(fx.weights("t1"), kept),
-        [fx.SECTORS[i] for i in kept],
+        sectors,
+        sectors,
+        labels=kept,
+        allocation_name="sector_allocation",
+        selection_name="stock_selection",
     )
 
     blocks = [

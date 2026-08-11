@@ -7,11 +7,12 @@ from .blocks import (
     decompose_blocks,
 )
 from .classify import Partition, classify
-from .reweight import nested_weight_drivers, nested_weights
+from .reweight import GroupReclassified, nested_weight_drivers, nested_weights
 
 __all__ = [
     "EFFECT_SEPARATOR",
     "Block",
+    "GroupReclassified",
     "Partition",
     "PartitionedDecomposition",
     "classify",

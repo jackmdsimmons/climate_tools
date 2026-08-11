@@ -54,13 +54,13 @@ The fix is structural, not numerical, and follows the three-step model in Bouche
    Survivors carry the full chain.
 3. **Choose the attribution method** and apply it uniformly.
 
-There is a second, subtler requirement. When survivors are decomposed into sector
-allocation and stock selection, their weights must be renormalised *within the
-survivor subset*, with the subset's share of the portfolio carried as its own
+There is a second, subtler requirement. When survivors are decomposed into
+allocation and selection, their weights must be renormalised *within the survivor
+subset*, with the subset's share of the portfolio carried as its own
 `reallocation` driver:
 
 ```
-w_j = w_RI * ws_s(j) * wis_j
+w_j = w_RI * wg_g(j) * wig_j
 ```
 
 Without it, a divested holding leaks into the sector allocation effect of the
@@ -80,7 +80,14 @@ partition = classify(contributions_t0, contributions_t1)
 kept = partition.survivors
 
 # Step 2 -- drivers per subset. Weights renormalised within the survivors.
-weight_drivers = nested_weight_drivers(weights_t0, weights_t1, sectors)
+# Groups are generic: GICS sector for corporates, region or income band for
+# sovereigns. Both periods are required so a reclassification is caught, not
+# assumed away.
+weight_drivers = nested_weight_drivers(
+    weights_t0, weights_t1, groups_t0, groups_t1, labels=kept,
+    allocation_name="sector_allocation",   # defaults are entity-neutral
+    selection_name="stock_selection",
+)
 
 result = decompose_blocks([
     Block(
@@ -140,20 +147,33 @@ tCO2e opening figure disagrees with exhibit 7's 19,667 (the exhibit is right).
       on non-positive values.
 - [x] **Phase 1 — partitioning.** Contribution-based classification of survivors,
       entrants and leavers; blocks with per-subset driver chains; survivor-subset
-      weight renormalisation.
-- [ ] **Phase 2 — sovereign single KPI.** GDP-denominated intensity, two-driver
-      weight × intensity decomposition. Sovereign-specific edge cases: country
-      entry/exit, GDP rebasing, PPP vs. nominal basis, emissions/GDP vintage lag.
-- [ ] **Phase 3 — nested allocation.** Region and income-group control for
-      sovereigns; GICS sector control for corporates.
-- [ ] **Phase 4 — scope disaggregation and inflation.** Scope 1 vs. Scope 2 as
-      separate additive drivers; physical-production intensity vs. revenue
-      intensity, separating real decarbonisation from price inflation.
-- [ ] **Phase 5 — corporates and blended portfolios.** Metric registry (WACI,
-      footprint, absolute emissions, financed emissions), mixed sovereign +
-      corporate books.
-- [ ] **Phase 6 — reporting and multi-period.** Waterfall output, period chaining
-      with data-revision effects kept separate from real change, CLI.
+      weight renormalisation, with group membership required for both periods so
+      that a reclassification is rejected rather than assumed away.
+- [ ] **Phase 2 — data contract and validation.** Entity-generic records
+      (`entity_id`, `entity_type`, `unit`, `basis`, `vintage`) so provenance is
+      captured at ingest while it is still recoverable; checks for vintage
+      consistency, weight coverage, and mixed denominator bases. A sovereign
+      worked example serves as the regression test — the engine needs no
+      sovereign-specific code, which is the property that test pins down.
+- [ ] **Phase 3 — denominator factoring.** Split the activity denominator into
+      real growth, inflation, FX and data-revision drivers. This is where the
+      GDP-rebasing and nominal-vs-PPP problems become their own waterfall bars
+      instead of contaminating the intensity effect.
+- [ ] **Phase 4 — scope disaggregation.** Scope 1 vs. Scope 2 as separate
+      additive drivers; physical-production intensity vs. revenue intensity.
+- [ ] **Phase 5 — blended books.** Metric presets (WACI, footprint, absolute
+      emissions, financed emissions) as configuration rather than code paths.
+      Encodes the one genuinely entity-type-dependent rule: PCAF sovereign and
+      corporate financed emissions overlap, since a company's Scope 1 already
+      sits inside its host country's territorial inventory, so the two cannot be
+      summed into a single KPI.
+- [ ] **Phase 6 — reporting and multi-period.** Waterfall output, period chaining,
+      CLI.
+
+Note that "corporate vs. sovereign" is deliberately absent as a phase. The engine
+is entity-agnostic and the grouping layer takes arbitrary labels, so asset class
+is configuration — which denominator, which grouping, which numerator taxonomy —
+not a code path.
 
 ## References
 

@@ -15,6 +15,7 @@ from .core import (
 )
 from .partition import (
     Block,
+    GroupReclassified,
     Partition,
     PartitionedDecomposition,
     classify,
@@ -28,6 +29,7 @@ __version__ = "0.1.0"
 __all__ = [
     "Block",
     "Decomposition",
+    "GroupReclassified",
     "NonPositiveDriver",
     "Partition",
     "PartitionedDecomposition",

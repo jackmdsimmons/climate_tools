@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from climate_attribution import Block, classify, decompose_blocks
-from climate_attribution.partition import nested_weight_drivers, nested_weights
+from climate_attribution.partition import (
+    GroupReclassified,
+    nested_weight_drivers,
+    nested_weights,
+)
 
 
 # ── Classification ───────────────────────────────────────────────────────────
@@ -63,27 +67,52 @@ def test_partition_summary_reads_clearly():
 
 def test_nested_weights_multiply_back_to_the_original_weights():
     weights = [0.2, 0.3, 0.4]
-    sectors = ["brown", "green", "green"]
-    group, sector, within = nested_weights(weights, sectors)
+    groups = ["brown", "green", "green"]
+    subset, group, within = nested_weights(weights, groups)
     for i, w in enumerate(weights):
-        assert group[i] * sector[i] * within[i] == pytest.approx(w)
+        assert subset[i] * group[i] * within[i] == pytest.approx(w)
 
 
-def test_group_factor_carries_the_subsets_share_of_the_portfolio():
-    group, sector, within = nested_weights([0.2, 0.3, 0.4], ["a", "b", "b"])
-    assert group[0] == pytest.approx(0.9)
-    assert sector == pytest.approx([0.2 / 0.9, 0.7 / 0.9, 0.7 / 0.9])
+def test_subset_factor_carries_the_subsets_share_of_the_portfolio():
+    subset, group, within = nested_weights([0.2, 0.3, 0.4], ["a", "b", "b"])
+    assert subset[0] == pytest.approx(0.9)
+    assert group == pytest.approx([0.2 / 0.9, 0.7 / 0.9, 0.7 / 0.9])
     assert within == pytest.approx([1.0, 3.0 / 7.0, 4.0 / 7.0])
 
 
 def test_nested_weight_drivers_are_positive_and_ready_for_lmdi():
+    groups = ["brown", "green", "green"]
     drivers = nested_weight_drivers(
-        [0.3, 0.3, 0.3], [0.2, 0.5, 0.3], ["brown", "green", "green"]
+        [0.3, 0.3, 0.3], [0.2, 0.5, 0.3], groups, groups
     )
-    assert set(drivers) == {"reallocation", "sector_allocation", "stock_selection"}
     for start, end in drivers.values():
         assert all(v > 0 for v in start)
         assert all(v > 0 for v in end)
+
+
+def test_default_driver_names_are_entity_neutral():
+    """A sovereign waterfall must not come out labelled 'stock selection'."""
+    groups = ["EMEA", "APAC"]
+    drivers = nested_weight_drivers([0.5, 0.5], [0.4, 0.6], groups, groups)
+    assert set(drivers) == {
+        "reallocation",
+        "group_allocation",
+        "within_group_selection",
+    }
+
+
+def test_driver_names_can_be_set_to_match_the_context():
+    groups = ["energy", "utilities"]
+    drivers = nested_weight_drivers(
+        [0.5, 0.5], [0.4, 0.6], groups, groups,
+        allocation_name="sector_allocation",
+        selection_name="stock_selection",
+    )
+    assert set(drivers) == {
+        "reallocation",
+        "sector_allocation",
+        "stock_selection",
+    }
 
 
 def test_empty_subset_is_rejected():
@@ -91,19 +120,65 @@ def test_empty_subset_is_rejected():
         nested_weights([0.0, 0.0], ["a", "b"])
 
 
-def test_empty_sector_is_rejected_with_actionable_guidance():
+def test_empty_group_is_rejected_with_actionable_guidance():
     with pytest.raises(ValueError, match="own block"):
         nested_weights([0.5, 0.0], ["a", "b"])
 
 
-def test_sector_label_count_must_match_weights():
-    with pytest.raises(ValueError, match="sector labels"):
+def test_group_label_count_must_match_weights():
+    with pytest.raises(ValueError, match="group labels"):
         nested_weights([0.5, 0.5], ["only-one"])
 
 
 def test_mismatched_period_lengths_are_rejected():
     with pytest.raises(ValueError, match="same length"):
-        nested_weight_drivers([0.5, 0.5], [1.0], ["a", "b"])
+        nested_weight_drivers([0.5, 0.5], [1.0], ["a", "b"], ["a", "b"])
+
+
+# ── Reclassification ─────────────────────────────────────────────────────────
+
+
+def test_reclassified_instrument_is_rejected_not_assumed_away():
+    """
+    Routine for sovereign books grouped by income band, which are revised
+    annually. The decomposition cannot represent a member moving between groups,
+    so it must refuse rather than silently adopt one label.
+    """
+    with pytest.raises(GroupReclassified) as excinfo:
+        nested_weight_drivers(
+            [0.5, 0.5],
+            [0.4, 0.6],
+            ["lower-middle", "high"],
+            ["upper-middle", "high"],
+            labels=["IDN", "DEU"],
+        )
+    message = str(excinfo.value)
+    assert "IDN" in message
+    assert "lower-middle" in message and "upper-middle" in message
+    assert "DEU" not in message
+
+
+def test_passing_the_same_groups_twice_asserts_fixed_membership():
+    groups = ["a", "b"]
+    drivers = nested_weight_drivers([0.5, 0.5], [0.4, 0.6], groups, groups)
+    assert drivers["group_allocation"][0] == pytest.approx([0.5, 0.5])
+
+
+def test_reclassification_error_survives_without_labels():
+    with pytest.raises(GroupReclassified, match="#0"):
+        nested_weight_drivers([0.5, 0.5], [0.4, 0.6], ["a", "b"], ["c", "b"])
+
+
+def test_group_label_lengths_must_match_each_other():
+    with pytest.raises(ValueError, match="same length"):
+        nested_weight_drivers([0.5, 0.5], [0.4, 0.6], ["a", "b"], ["a"])
+
+
+def test_label_count_must_match_instruments():
+    with pytest.raises(ValueError, match="labels"):
+        nested_weight_drivers(
+            [0.5, 0.5], [0.4, 0.6], ["a", "b"], ["a", "b"], labels=["only-one"]
+        )
 
 
 # ── Block composition ────────────────────────────────────────────────────────
